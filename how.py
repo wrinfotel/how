@@ -356,10 +356,19 @@ storage:
     return p
 
 
-# Copy-paste hook lines. bash needs ${COMMAND:?} (last command, pre-Enter);
-# zsh hooks must call `how` inside the precmd() body.
-HOOK_BASH = """PROMPT_COMMAND='HOW_CMD="$COMMAND" how record; '""" + '"${PROMPT_COMMAND:+$PROMPT_COMMAND}"'
-HOOK_ZSH = 'precmd() { HOW_CMD="$COMMAND" how record; }'
+# Copy-paste hook lines. Bash has no $COMMAND variable (that's zsh), so the
+# bash hook pulls the last history entry itself; empty history at shell
+# startup records nothing, silently. zsh hooks must call `how` inside the
+# precmd() body.
+HOOK_BASH = (
+    '__how_record() { '
+    'local c; '
+    'c="$(HISTTIMEFORMAT= history 1 | sed -E \'s/^[[:space:]]*[0-9]+[[:space:]]+//\')"; '
+    '[ -n "$c" ] && HOW_CMD="$c" how record; '
+    '}; '
+    'PROMPT_COMMAND="__how_record; ${PROMPT_COMMAND:+$PROMPT_COMMAND}"'
+)
+HOOK_ZSH = 'precmd() { local c; c="$(fc -ln -1)"; c="${c# }"; [ -n "$c" ] && HOW_CMD="$c" how record; }'
 
 
 def cmd_init(shell: str) -> None:
