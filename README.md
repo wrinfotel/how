@@ -37,8 +37,12 @@ cp how.py ~/.local/bin/how && chmod +x ~/.local/bin/how
 Then add the hook (one line, prints itself):
 
 ```bash
-echo 'eval "$(how init bash)"' >> ~/.bashrc    # or zsh for ~/.zshrc
+echo 'eval "$($HOME/.local/bin/how init bash)"' >> ~/.bashrc    # or zsh for ~/.zshrc
 ```
+
+Use the full path: `.profile` on some distros (Ubuntu etc.) extends PATH
+with `~/.local/bin` *after* `.bashrc` is read, so a bare `how` in the eval
+fails with "command not found" at every new terminal.
 
 What it prints is literally:
 
