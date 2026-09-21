@@ -275,6 +275,105 @@ class HookEnv(unittest.TestCase):
         store = how.load_store(db)
         self.assertIn("cargo build --release", store[tmp.name])
 
+    def test_bash_hook_has_no_command_variable(self):
+        """Regression: bash has no $COMMAND, the old hook recorded nothing.
+
+        The generated hook line must not reference $COMMAND/$BASH_COMMAND and
+        must resolve the last history entry itself (history 1 | ...).
+        """
+        hook = how.cmd_init_capture("bash") if hasattr(how, "cmd_init_capture") else how.HOOK_BASH
+        self.assertNotIn("$COMMAND", hook)
+        self.assertNotIn("${COMMAND", hook)
+        self.assertIn("history 1", hook)
+        self.assertIn("PROMPT_COMMAND=", hook)
+        self.assertIn("how record", hook)
+        # prepend-append pattern preserved: existing PROMPT_COMMAND chains on
+        self.assertIn("${PROMPT_COMMAND:+$PROMPT_COMMAND}", hook)
+
+    def test_bash_hook_is_valid_shell(self):
+        """The eval'd hook string must parse as bash (syntax check)."""
+        import subprocess
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=how.HOOK_BASH + "\n",
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_hook_recording_is_silent_on_startup(self):
+        """Fresh interactive shell (empty history): hook must not print or error.
+
+        Runs the generated hook in a real interactive bash, executes nothing,
+        exits. Record must stay silent and nothing may be written to the store.
+        """
+        import subprocess
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmpp = Path(tmp.name)
+        howbin = tmpp / "bin"
+        howbin.mkdir()
+        (howbin / "how").write_text(Path(how.__file__).resolve().read_text())
+        (howbin / "how").chmod(0o755)
+        # PATH must include `how` BEFORE the hook line (the hook calls it at
+        # the very first prompt — mirrors real .bashrc ordering).
+        script = (
+            f"export PATH={howbin}:$PATH\n"
+            + how.HOOK_BASH
+            + "\nexit\n"
+        )
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-i"],
+            input=script, text=True, capture_output=True,
+            env={"PATH": os.environ["PATH"], "HOME": tmp.name,
+                 "XDG_DATA_HOME": tmp.name, "TERM": "dumb"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("how:", proc.stderr)  # no 'nothing to record' noise
+        db = tmpp / "how" / "how.json"
+        # The hook line itself (typed as input line 1) gets recorded on the
+        # NEXT prompt — that's correct per-project behavior, not noise.
+        if db.exists():
+            store = how.load_store(db)
+            recorded = {e["cmd"] for d in store.values() for e in d.values()}
+            self.assertNotIn("", recorded)  # never record empty commands
+            for cmd in recorded:
+                self.assertTrue(cmd.strip(), f"empty command recorded: {store}")
+
+    def test_bash_hook_records_last_command(self):
+        """End-to-end: eval the hook in an interactive bash, run commands,
+        entries land in the store (each PROMPT_COMMAND records the previous
+        command from in-memory history)."""
+        import subprocess
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmpp = Path(tmp.name)
+        howbin = tmpp / "bin"
+        howbin.mkdir()
+        (howbin / "how").write_text(Path(how.__file__).resolve().read_text())
+        (howbin / "how").chmod(0o755)
+        # PATH must include `how` BEFORE the hook line (the hook calls it at
+        # the very first prompt — mirrors real .bashrc ordering).
+        script = (
+            f"export PATH={howbin}:$PATH\n"
+            + how.HOOK_BASH
+            + "\necho one\n"
+            + "echo two\n"
+            + "exit\n"
+        )
+        env = {"PATH": os.environ["PATH"], "HOME": tmp.name,
+               "XDG_DATA_HOME": str(tmpp), "TERM": "dumb"}
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-i"],
+            input=script, text=True, capture_output=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("how:", proc.stderr)
+        db = tmpp / "how" / "how.json"
+        self.assertTrue(db.exists(), "hook recorded nothing at all")
+        store = how.load_store(db)
+        recorded = [e["cmd"] for d in store.values() for e in d.values()]
+        self.assertIn("echo one", recorded)
+        self.assertIn("echo two", recorded)
+
 
 if __name__ == "__main__":
     unittest.main()

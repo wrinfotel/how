@@ -43,8 +43,11 @@ echo 'eval "$(how init bash)"' >> ~/.bashrc    # or zsh for ~/.zshrc
 What it prints is literally:
 
 ```bash
-PROMPT_COMMAND='HOW_CMD="$COMMAND" how record; '"${PROMPT_COMMAND:+$PROMPT_COMMAND}"
+__how_record() { local c; c="$(HISTTIMEFORMAT= history 1 | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"; [ -n "$c" ] && HOW_CMD="$c" how record; }; PROMPT_COMMAND="__how_record; ${PROMPT_COMMAND:+$PROMPT_COMMAND}"
 ```
+
+(The hook resolves the last command from bash history itself — bash has no
+`$COMMAND` variable, so a hook that references it records nothing.)
 
 The record call is silent and fast (JSON rewrite, no SQLite, no daemon).
 To see how it looks without installing anything:
