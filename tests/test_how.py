@@ -118,6 +118,7 @@ class Listing(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.db = self.root / "how.json"
         (self.root / "proj").mkdir()
+        (self.root / "proj" / ".git").mkdir()  # proj is a repo: boundary for listings
         (self.root / "proj" / "sub").mkdir(parents=True)
         run(["--db", str(self.db), "record"], env={"HOW_CMD": "./gradlew bootRun"},
             cwd=str(self.root / "proj"))
@@ -162,7 +163,8 @@ class Listing(unittest.TestCase):
     def test_json_output(self):
         code, out, _ = run(["--db", str(self.db), "--json"], cwd=str(self.root / "proj"))
         data = json.loads(out)
-        self.assertEqual(data["count"], 1)
+        # repo-wide view: root (gradlew) + subdir (unittest) entries
+        self.assertEqual(data["count"], 2)
         self.assertIn("commands", data)
         self.assertIn("gradlew", data["commands"][0]["cmd"])
 
@@ -201,6 +203,62 @@ class Listing(unittest.TestCase):
         code, _, err = run(["--db", str(self.root / "bad.json")], cwd=str(self.root))
         self.assertEqual(code, 1)
         self.assertIn("cannot read store", err)
+
+
+class Scoping(unittest.TestCase):
+    """Listings are bounded by the repo (nearest ancestor with .git).
+
+    Regression: any recorded ancestor used to bleed into every project
+    below it — commands run in ~ appeared inside each repo, and repo
+    commands appeared in ~.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db = self.root / "how.json"
+        # home-like dir without .git, and a real repo beside/below it
+        (self.root / "homeish").mkdir()
+        (self.root / "homeish" / "repo").mkdir()
+        (self.root / "homeish" / "repo" / ".git").mkdir()
+        (self.root / "homeish" / "repo" / "sub").mkdir()
+        self.addCleanup(self.tmp.cleanup)
+
+    def rec(self, cmd, cwd):
+        code, _, err = run(["--db", str(self.db), "record"],
+                           env={"HOW_CMD": cmd}, cwd=str(cwd))
+        self.assertEqual(code, 0, err)
+
+    def test_home_commands_not_visible_inside_repo(self):
+        self.rec("xdg-open notes.txt", self.root / "homeish")
+        self.rec("make build", self.root / "homeish" / "repo")
+        code, out, _ = run(["--db", str(self.db)],
+                           cwd=str(self.root / "homeish" / "repo"))
+        self.assertIn("make build", out)
+        self.assertNotIn("xdg-open", out)
+
+    def test_repo_commands_not_visible_in_home(self):
+        self.rec("xdg-open notes.txt", self.root / "homeish")
+        self.rec("make build", self.root / "homeish" / "repo")
+        code, out, _ = run(["--db", str(self.db)],
+                           cwd=str(self.root / "homeish"))
+        self.assertIn("xdg-open", out)
+        self.assertNotIn("make build", out)
+
+    def test_outside_repo_only_own_dir(self):
+        self.rec("server-a --start", self.root / "homeish")
+        (self.root / "elsewhere").mkdir()
+        self.rec("server-b --start", self.root / "elsewhere")
+        code, out, _ = run(["--db", str(self.db)],
+                           cwd=str(self.root / "elsewhere"))
+        self.assertIn("server-b", out)
+        self.assertNotIn("server-a", out)
+
+    def test_subdir_still_sees_repo_root(self):
+        self.rec("make build", self.root / "homeish" / "repo")
+        code, out, _ = run(["--db", str(self.db)],
+                           cwd=str(self.root / "homeish" / "repo" / "sub"))
+        self.assertIn("make build", out)
 
 
 class Forget(unittest.TestCase):
@@ -290,6 +348,16 @@ class HookEnv(unittest.TestCase):
         # prepend-append pattern preserved: existing PROMPT_COMMAND chains on
         self.assertIn("${PROMPT_COMMAND:+$PROMPT_COMMAND}", hook)
 
+    def test_hooks_skip_first_prompt(self):
+        """Regression: bash/zsh preload the previous session's history before
+        the first prompt, so the old hook re-recorded that stale last command
+        into the new shell's start directory (~). Both hooks must guard the
+        first prompt before resolving any history."""
+        for hook in (how.HOOK_BASH, how.HOOK_ZSH):
+            self.assertIn("__HOW_SEEN", hook)
+            # the guard must come before the history lookup
+            self.assertLess(hook.index("__HOW_SEEN"), hook.index("history 1" if hook is how.HOOK_BASH else "fc -ln"))
+
     def test_bash_hook_is_valid_shell(self):
         """The eval'd hook string must parse as bash (syntax check)."""
         import subprocess
@@ -337,6 +405,36 @@ class HookEnv(unittest.TestCase):
             self.assertNotIn("", recorded)  # never record empty commands
             for cmd in recorded:
                 self.assertTrue(cmd.strip(), f"empty command recorded: {store}")
+
+    def test_bash_hook_no_stale_first_prompt_record(self):
+        """End-to-end regression: a fresh interactive shell whose HISTFILE
+        carries the previous session's last command must NOT record it at the
+        first prompt. The old hook wrote that stale command into the new
+        shell's start directory (~) — the '~ shows project commands' bug."""
+        import subprocess
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmpp = Path(tmp.name)
+        howbin = tmpp / "bin"
+        howbin.mkdir()
+        (howbin / "how").write_text(Path(how.__file__).resolve().read_text())
+        (howbin / "how").chmod(0o755)
+        (tmpp / "hist").write_text("echo STALE_CMD_FROM_OLD_SESSION\n")
+        script = (
+            f"export PATH={howbin}:$PATH\n"
+            + how.HOOK_BASH
+            + "\nexit\n"
+        )
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-i"],
+            input=script, text=True, capture_output=True,
+            env={"PATH": os.environ["PATH"], "HOME": tmp.name,
+                 "XDG_DATA_HOME": str(tmpp), "TERM": "dumb",
+                 "HISTFILE": str(tmpp / "hist")},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        db = tmpp / "how" / "how.json"
+        self.assertFalse(db.exists(), f"stale command recorded at startup: {db.read_text() if db.exists() else ''}")
 
     def test_bash_hook_records_last_command(self):
         """End-to-end: eval the hook in an interactive bash, run commands,

@@ -16,6 +16,12 @@ want answers.
     how --json               # machine-readable
 
 Storage: JSON at ~/.local/share/how/how.json (XDG-aware, respects $HOW_DB).
+Scope: commands belong to their project — the nearest ancestor containing
+.git. Inside a repo, subdirs see the root's habits; outside any repo only
+that exact directory's own entries are used (no home-dir bleed). The shell
+hook skips the very first prompt: bash/zsh preload the previous session's
+history before it, and the old hook re-recorded that stale last command
+into the new session's start directory.
 Noise like `ls`, `cd`, `git status` is skipped on record by default.
 
 Exit codes: 0 ok (even with empty output), 1 usage/IO error, 2 dirty flags
@@ -171,18 +177,34 @@ def weight(n: int, ts: float, now: float, expiring: bool) -> float:
     return (n ** ALPHA) * math.exp(-age / TAU_DAYS)
 
 
-def dir_candidates(store: dict, start: Path) -> dict:
-    """Entries for this dir plus every recorded ancestor of it.
+def project_root(start: Path) -> Path | None:
+    """Nearest ancestor (incl. start) containing .git — the project boundary."""
+    for d in (start, *start.resolve().parents):
+        if (d / ".git").exists():
+            return d.resolve()
+    return None
 
-    Working in a subdir of a recorded project root should surface the
-    project's commands: the hook records subdirs too, but ancestors carry
-    the longer history.
+
+def dir_candidates(store: dict, start: Path) -> dict:
+    """Entries visible from `start`, bounded by the project root.
+
+    Inside a repo (nearest ancestor with .git): the root's and every
+    recorded subdir's entries — standing in a subdir should surface the
+    project's habits. Outside any repo: strictly this directory's own
+    entries; merging generic ancestors like ~ bled unrelated commands
+    into every project below them (and vice versa).
     """
     out: dict = {}
-    start_abs = str(start.resolve())
+    start_abs = start.resolve()
+    root = project_root(start_abs)
     for d in store:
         try:
-            if start_abs == d or start_abs.startswith(d.rstrip("/") + "/"):
+            dpath = Path(d)
+            if root is not None:
+                ok = dpath == root or root in dpath.parents
+            else:
+                ok = dpath == start_abs
+            if ok:
                 out.update(store[d])
         except (AttributeError, ValueError):
             continue
@@ -358,17 +380,28 @@ storage:
 
 # Copy-paste hook lines. Bash has no $COMMAND variable (that's zsh), so the
 # bash hook pulls the last history entry itself; empty history at shell
-# startup records nothing, silently. zsh hooks must call `how` inside the
-# precmd() body.
+# startup records nothing, silently. The first prompt is skipped: bash and
+# zsh preload the PREVIOUS session's history before it, so `history 1` /
+# `fc -ln -1` there return a stale command from wherever the old session
+# ended up — it used to be re-recorded into the new shell's start directory
+# (~), leaking project commands into every later listing. zsh hooks must
+# call `how` inside the precmd() body.
 HOOK_BASH = (
     '__how_record() { '
     'local c; '
+    '[ -n "$__HOW_SEEN" ] || { __HOW_SEEN=1; return; }; '
     'c="$(HISTTIMEFORMAT= history 1 | sed -E \'s/^[[:space:]]*[0-9]+[[:space:]]+//\')"; '
     '[ -n "$c" ] && HOW_CMD="$c" how record; '
     '}; '
     'PROMPT_COMMAND="__how_record; ${PROMPT_COMMAND:+$PROMPT_COMMAND}"'
 )
-HOOK_ZSH = 'precmd() { local c; c="$(fc -ln -1)"; c="${c# }"; [ -n "$c" ] && HOW_CMD="$c" how record; }'
+HOOK_ZSH = (
+    'precmd() { '
+    'local c; '
+    '[ -n "$__HOW_SEEN" ] || { __HOW_SEEN=1; return; }; '
+    'c="$(fc -ln -1)"; c="${c# }"; [ -n "$c" ] && HOW_CMD="$c" how record; '
+    '}'
+)
 
 
 def cmd_init(shell: str) -> None:
