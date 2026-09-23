@@ -16,8 +16,9 @@ $ how
 ```
 
 - **Per-project memory.** Records every command together with its working
-  directory. Standing in any subfolder, you see the project's habits, not
-  the whole world.
+  directory. A "project" is the nearest ancestor containing `.git`: inside
+  a repo, any subfolder shows the project's habits; outside a repo you see
+  only that exact directory's entries — nothing bleeds in from `~`.
 - **Frequency + recency ranking.** `weight = n^0.6 · exp(-age/21d)`: fresh
   habits dominate, but old muscle memory still surfaces. Package-manager
   commands (`pip install`, `sudo apt`, `gradle`…) decay faster — they rot.
@@ -47,11 +48,15 @@ fails with "command not found" at every new terminal.
 What it prints is literally:
 
 ```bash
-__how_record() { local c; c="$(HISTTIMEFORMAT= history 1 | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"; [ -n "$c" ] && HOW_CMD="$c" how record; }; PROMPT_COMMAND="__how_record; ${PROMPT_COMMAND:+$PROMPT_COMMAND}"
+__how_record() { local c; [ -n "$__HOW_SEEN" ] || { __HOW_SEEN=1; return; }; c="$(HISTTIMEFORMAT= history 1 | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"; [ -n "$c" ] && HOW_CMD="$c" how record; }; PROMPT_COMMAND="__how_record; ${PROMPT_COMMAND:+$PROMPT_COMMAND}"
 ```
 
 (The hook resolves the last command from bash history itself — bash has no
-`$COMMAND` variable, so a hook that references it records nothing.)
+`$COMMAND` variable, so a hook that references it records nothing. The
+`__HOW_SEEN` guard skips the very first prompt: bash and zsh preload the
+*previous* session's history before it, and without the guard that stale
+last command got re-recorded into the new shell's start directory — often
+`~` — leaking commands between projects.)
 
 The record call is silent and fast (JSON rewrite, no SQLite, no daemon).
 To see how it looks without installing anything:
